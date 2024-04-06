@@ -1,10 +1,14 @@
 #include <iostream>
 #include "opencv2/opencv.hpp"
 // #include <nlohmann/json.hpp>
-#include <fstream>
+// #include <fstream>
+#include <gtkmm.h>
 #include <gtkmm/application.h>
-#include <gtkmm/button.h>
+// #include <gtkmm/button.h>
 #include <gtkmm/window.h>
+#include <gtkmm/drawingarea.h>
+#include <gdkmm/pixbuf.h>
+#include <gdkmm/general.h>
 
 extern "C" {
   #include "apriltag.h"
@@ -14,6 +18,9 @@ extern "C" {
 
 // using json = nlohmann::json;
 
+// Are top-level statements like this a good idea?
+cv::VideoCapture cap(0);
+
 struct Tag {
   int id;
   double pitch, yaw, roll, i, j, k;
@@ -21,22 +28,52 @@ struct Tag {
   bool isGauged;
 };
 
+class CameraFeed : public Gtk::DrawingArea {
+  public:
+    CameraFeed();
+    virtual ~CameraFeed();
+  protected:
+    void on_draw(const Cairo::RefPtr<Cairo::Context>& cr, int width, int height);
+};
+
+CameraFeed::CameraFeed() {
+  set_draw_func(sigc::mem_fun(*this, &CameraFeed::on_draw));
+}
+
+CameraFeed::~CameraFeed() {}
+
+void CameraFeed::on_draw(const Cairo::RefPtr<Cairo::Context>& cr, int width, int height) {
+  cv::Mat frame;
+  cap >> frame;
+  auto img = Gdk::Pixbuf::create_from_data(frame.data, Gdk::Colorspace::RGB, false, 8, frame.rows, frame.cols, frame.step);
+  set_content_height(img->get_height());
+  set_content_width(img->get_width());
+  Gdk::Cairo::set_source_pixbuf(cr, img, 0, 0);
+  cr->rectangle(2, 2, img->get_width(), img->get_height() * 2 / 3);
+  cr->fill();
+}
+
+
 class Window : public Gtk::Window {
   public:
-    Window() : button("Hello world") {
-      set_title("Basic application");
-      set_default_size(200, 200);
-      button.signal_clicked().connect(sigc::mem_fun(*this, &Window::on_button_clicked));
-      set_child(button);
-    }
-    virtual ~Window() {};
+    Window();
   protected:
-    void on_button_clicked() {
-      std::cout << "Hello world" << std::endl;
-    }
-
-    Gtk::Button button;
+    CameraFeed feed;
+    bool periodic();
 };
+
+bool Window::periodic() {
+  feed.queue_draw();
+  std::cout << "Redraw..." << std::endl;
+  return true;
+}
+
+Window::Window() {
+  set_title("Fieldspace");
+  set_default_size(600, 600);
+  set_child(feed);
+  Glib::signal_timeout().connect(sigc::mem_fun(*this, &Window::periodic), 50, 0);
+}
 
 // Largely based on example at https://github.com/AprilRobotics/apriltag/blob/master/example/opencv_demo.cc
 
