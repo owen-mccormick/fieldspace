@@ -9,6 +9,7 @@
 #include <gtkmm/drawingarea.h>
 #include <gdkmm/pixbuf.h>
 #include <gdkmm/general.h>
+#include <gtkmm/box.h>
 
 extern "C" {
   #include "apriltag.h"
@@ -19,6 +20,7 @@ extern "C" {
 // using json = nlohmann::json;
 
 // Are top-level statements like this a good idea?
+// Should be relocated inside of the Window class
 cv::VideoCapture cap(0);
 
 struct Tag {
@@ -28,21 +30,22 @@ struct Tag {
   bool isGauged;
 };
 
-class CameraFeed : public Gtk::DrawingArea {
+// FeedAndField: Represents an OpenCV camera feed drawn in a gtkmm DrawingArea
+class FeedAndField : public Gtk::DrawingArea {
   public:
-    CameraFeed();
-    virtual ~CameraFeed();
+    FeedAndField();
+    virtual ~FeedAndField();
   protected:
     void on_draw(const Cairo::RefPtr<Cairo::Context>& cr, int width, int height);
 };
 
-CameraFeed::CameraFeed() {
-  set_draw_func(sigc::mem_fun(*this, &CameraFeed::on_draw));
+FeedAndField::FeedAndField() {
+  set_draw_func(sigc::mem_fun(*this, &FeedAndField::on_draw));
 }
 
-CameraFeed::~CameraFeed() {}
+FeedAndField::~FeedAndField() {}
 
-void CameraFeed::on_draw(const Cairo::RefPtr<Cairo::Context>& cr, int width, int height) {
+void FeedAndField::on_draw(const Cairo::RefPtr<Cairo::Context>& cr, int width, int height) {
   cv::Mat frame;
   cap >> frame;
   auto img = Gdk::Pixbuf::create_from_data(frame.data, Gdk::Colorspace::RGB, false, 8, frame.rows, frame.cols, frame.step);
@@ -51,27 +54,38 @@ void CameraFeed::on_draw(const Cairo::RefPtr<Cairo::Context>& cr, int width, int
   Gdk::Cairo::set_source_pixbuf(cr, img, 0, 0);
   cr->rectangle(2, 2, img->get_width(), img->get_height() * 2 / 3);
   cr->fill();
+  // Field drawing: 2D field view updated with labeled dots for tag sightings
+  // Field image from https://www.chiefdelphi.com/t/2024-crescendo-top-down-field-renders/447764
+  // TODO - use glib-compile-resources to bake image into executable
+  auto field = Gdk::Pixbuf::create_from_file("resources/2160xDarkCroppedFixed.png");
+  // Reize field image
+  field = field->scale_simple(field->get_width() / 3.65, field->get_height() / 3.65, Gdk::InterpType::BILINEAR);
+  Gdk::Cairo::set_source_pixbuf(cr, field, 485, 2);
+  cr->rectangle(485, 2, field->get_width(), field->get_height());
+  cr->fill();
 }
-
 
 class Window : public Gtk::Window {
   public:
     Window();
   protected:
-    CameraFeed feed;
+    FeedAndField feed;
+    Gtk::Box box;
     bool periodic();
 };
 
 bool Window::periodic() {
   feed.queue_draw();
-  std::cout << "Redraw..." << std::endl;
+  // std::cout << "Redraw..." << std::endl;
   return true;
 }
 
 Window::Window() {
   set_title("Fieldspace");
-  set_default_size(600, 600);
+  set_default_size(1538, 800);
   set_child(feed);
+  // box.append(field);
+  // Update camera feed at 20 Hz
   Glib::signal_timeout().connect(sigc::mem_fun(*this, &Window::periodic), 50, 0);
 }
 

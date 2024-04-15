@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/field">
+    <file>resources/2160xDarkCroppedFixed.png</file>
+  </gresource>
+</gresources>
