@@ -1,4 +1,7 @@
 #include <iostream>
+#include <string>
+// #include <regex>
+#include <map>
 #include "opencv2/opencv.hpp"
 // #include <nlohmann/json.hpp>
 // #include <fstream>
@@ -13,10 +16,13 @@
 extern "C" {
   #include "apriltag.h"
   #include "tag36h11.h"
+  #include "apriltag_pose.h"
   #include "common/getopt.h"
 }
 
 // using json = nlohmann::json;
+
+// TODO - be consistent about CamelCase vs underscore_naming
 
 // Are top-level statements like this a good idea?
 // Should be relocated inside of the Window class
@@ -32,6 +38,7 @@ struct Tag {
 };
 
 // Subclass of entry box that only accepts numeric input (https://stackoverflow.com/questions/10279579/force-numeric-input-in-a-gtkentry-widget#10282948)
+// TODO - this only works when inserting text from code; user can still enter letter and symbols
 class NumericEntry : public Gtk::Entry {
   public:
     void on_insert_text(const Glib::ustring& text, int* position);
@@ -54,17 +61,36 @@ bool NumericEntry::contains_only_numbers(const Glib::ustring& text) {
 class FeedAndField : public Gtk::DrawingArea {
   public:
     FeedAndField();
+    // May be a more ergonomic way to pass this data around
+    void setSeedID(int id);
+    void setSeedX(double x);
+    void setSeedY(double y);
+    int getSeedID();
+    double getSeedX();
+    double getSeedY();
     virtual ~FeedAndField();
   protected:
-    void on_draw(const Cairo::RefPtr<Cairo::Context>& cr, int width, int height);
-    // void FeedAndField::draw_text(const Cairo::RefPtr<Cairo::Context>& cr, int x, int y, int rectangle_width, int rectangle_height, std::string text);
+    void plotOnField(const Cairo::RefPtr<Cairo::Context>& cr, double xMeters, double yMeters, int fieldXPixels, int fieldYPixels, bool isSeed);
+    void onDraw(const Cairo::RefPtr<Cairo::Context>& cr, int width, int height);
     // apriltag_family_t* tf;
     // apriltag_detector_t* td;
     const int fieldX = 485;
     const int fieldY = 2;
+    const double fieldMetersX = 16.6;
+    const double fieldMetersY = 8.2;
+    const double tagSize = 0.1651; // Size of AprilTags in meters; should be 6.5 inches to meters according to the 2024 FRC game manual
+    const double fx = 200; // TODO - tune / calibrate to camera; maybe accept these as arguments
+    const int fy = 200;
+    const int cx = 100;
+    const int cy = 100;
+    int seedID = 0;
+    double seedX = 0;
+    double seedY = 0;
+    std::map<int, std::pair<double, double>> tagPoses;
 };
 
 FeedAndField::FeedAndField() {
+  tagPoses = std::map<int, std::pair<double, double>>();
   apriltag_detector_add_family(td, tf);
   // TODO - tune
   td->quad_decimate = 2.0;
@@ -72,14 +98,44 @@ FeedAndField::FeedAndField() {
   td->nthreads = 1;
   td->debug = 0;
   td->refine_edges = 1;
-  set_draw_func(sigc::mem_fun(*this, &FeedAndField::on_draw));
+  set_draw_func(sigc::mem_fun(*this, &FeedAndField::onDraw));
 }
+
+// Setters and getters
+void FeedAndField::setSeedID(int id) {
+  if (id != seedID) {
+    seedID = id;
+    // Clear cached poses
+    tagPoses.clear();
+    tagPoses[id] = std::pair<double, double>(seedX, seedY);
+  }
+}
+void FeedAndField::setSeedX(double x) {
+  if (x != seedX) {
+    seedX = x;
+    // Clear cached poses
+    tagPoses.clear();
+    tagPoses[seedID] = std::pair<double, double>(seedX, seedY);
+  }
+}
+void FeedAndField::setSeedY(double y) {
+  if (y != seedY) {
+    seedY = y;
+    // Clear cached poses
+    tagPoses.clear();
+    tagPoses[seedID] = std::pair<double, double>(seedX, seedY);
+  }
+}
+int FeedAndField::getSeedID() { return seedID; }
+double FeedAndField::getSeedX() { return seedX; }
+double FeedAndField::getSeedY() { return seedY; }
 
 FeedAndField::~FeedAndField() {
   apriltag_detector_destroy(td);
   tag36h11_destroy(tf);
 }
 
+// For labelling the dots that get drawn on the map by AprilTag ID
 // From https://gnome.pages.gitlab.gnome.org/gtkmm-documentation/sec-drawing-text.html
 // void FeedAndField::draw_text(const Cairo::RefPtr<Cairo::Context>& cr, int x, int y int rectangle_width, int rectangle_height, std::string text) {
   // Pango::FontDescription font;
@@ -101,7 +157,20 @@ FeedAndField::~FeedAndField() {
   // layout->show_in_cairo_context(cr);
 // }
 
-void FeedAndField::on_draw(const Cairo::RefPtr<Cairo::Context>& cr, int width, int height) {
+void FeedAndField::plotOnField(const Cairo::RefPtr<Cairo::Context>& cr, double xMeters, double yMeters, int fieldXPixels, int fieldYPixels, bool isSeed) {
+  cr->save();
+  cr->arc(fieldX + xMeters * fieldXPixels / fieldMetersX, fieldY + yMeters * fieldYPixels / fieldMetersY, 10, 0, 2.0 * M_PI);
+  if (isSeed) {
+    cr->set_source_rgb(0, 0, 0.8);
+  } else {
+    cr->set_source_rgb(0, 0.8, 0);
+  }
+  cr->fill_preserve();
+  cr->restore();
+  cr->stroke();
+}
+
+void FeedAndField::onDraw(const Cairo::RefPtr<Cairo::Context>& cr, int width, int height) {
   cv::Mat frame, gray;
   cap >> frame;
   // frame = cv::imread("/home/omccormick/dev/fieldspace/resources/tagformats_web.png");
@@ -111,11 +180,11 @@ void FeedAndField::on_draw(const Cairo::RefPtr<Cairo::Context>& cr, int width, i
   // Make an image_u8_t header for the Mat data
   image_u8_t im = {gray.cols, gray.rows, gray.cols, gray.data};
 
-  zarray_t* detections = apriltag_detector_detect(td, &im); // TODO - this line causes segfaults
+  zarray_t* detections = apriltag_detector_detect(td, &im);
 
-  // Draw detection outlines
-  // Largely based on example at https://github.com/AprilRobotics/apriltag/blob/master/example/opencv_demo.cc
   for (int i = 0; i < zarray_size(detections); i++) {
+    // Draw detection outlines
+    // Largely based on example at https://github.com/AprilRobotics/apriltag/blob/master/example/opencv_demo.cc
     apriltag_detection_t *det;
     zarray_get(detections, i, &det);
     line(frame, cv::Point(det->p[0][0], det->p[0][1]),
@@ -141,7 +210,7 @@ void FeedAndField::on_draw(const Cairo::RefPtr<Cairo::Context>& cr, int width, i
       det->c[1]+textsize.height/2),
       fontface, fontscale, cv::Scalar(0xff, 0x99, 0), 2);
   }
-  apriltag_detections_destroy(detections);
+  // TODO - label plotted points on map with ID of corresponding tag
   // OpenCV drawing test
   // int fontface = cv::FONT_HERSHEY_SCRIPT_SIMPLEX;
   // double fontscale = 1.0;
@@ -170,16 +239,60 @@ void FeedAndField::on_draw(const Cairo::RefPtr<Cairo::Context>& cr, int width, i
   cr->rectangle(fieldX, fieldY, field->get_width(), field->get_height());
   cr->fill();
 
-  // Draw dots on the map at tag positions (test)
+  // Graph seed tag
+  plotOnField(cr, seedX, seedY, field->get_width(), field->get_height(), true);
 
-  for (double i = 0; i <= 1; i += 0.1) {
-    cr->save();
-    cr->arc(fieldX + i * field->get_width(), fieldY + i * field->get_height(), 10, 0, 2.0 * M_PI);
-    cr->set_source_rgb(0, 0.8, 0);
-    cr->fill_preserve();
-    cr->restore();
-    cr->stroke();
+  // Plot each tag on the map judging from the pose of a reference tag that already has a pose estimate, starting from the seed.
+  // We need this because we have no idea where the camera is.
+  for (int i = 0; i < zarray_size(detections); i++) {
+    apriltag_detection_t *reference_det;
+    zarray_get(detections, i, &reference_det);
+    int reference_id = reference_det->id;
+    for (int j = 0; j < zarray_size(detections); j++) {
+      if (j != i) { //
+        apriltag_detection_t *to_compare_det;
+        zarray_get(detections, j, &to_compare_det);
+        int to_compare_id = to_compare_det->id;
+        
+
+        if (tagPoses.count(reference_id) && !tagPoses.count(to_compare_id)) { // We have a pose for the reference tag
+          // Do pose estimation with the reference and new tag
+          apriltag_detection_info_t reference_info;
+          reference_info.det = to_compare_det;
+          reference_info.tagsize = tagSize;
+          reference_info.fx = fx;
+          reference_info.fy = fy;
+          reference_info.cx = cx;
+          reference_info.cy = cy;
+          apriltag_pose_t reference_pose;
+          estimate_tag_pose(&reference_info, &reference_pose);
+          apriltag_detection_info_t to_compare_info;
+          to_compare_info.det = to_compare_det;
+          to_compare_info.tagsize = tagSize;
+          to_compare_info.fx = fx;
+          to_compare_info.fy = fy;
+          to_compare_info.cx = cx;
+          to_compare_info.cy = cy;
+          apriltag_pose_t to_compare_pose;
+          estimate_tag_pose(&to_compare_info, &to_compare_pose);
+          // Reference field space minus reference camera space plus new camera space for each coordinate
+          // TODO - check that right coordinates are compared and units are as expected
+          tagPoses[to_compare_id] = std::pair<double, double>(
+            tagPoses[reference_id].first - reference_pose.t->data[0] + to_compare_pose.t->data[0],
+            tagPoses[reference_id].second - reference_pose.t->data[1] + to_compare_pose.t->data[1]
+          ); 
+        }
+      }
+    } 
   }
+
+  // Iterate through known points and plot, with the exception of the seed that has already been plotted above
+  for (auto const& [id, coords] : tagPoses) {
+    if (id != seedID) {
+      plotOnField(cr, coords.first, coords.second, field->get_width(), field->get_height(), false);
+    }
+  }
+  apriltag_detections_destroy(detections);
 }
 
 class Window : public Gtk::Window {
@@ -193,8 +306,41 @@ class Window : public Gtk::Window {
 };
 
 bool Window::periodic() {
+  // std::cout << "Redraw...`" << std::endl;
+  // Interpret input from text boxes
+  try {
+    feedAndField.setSeedID(std::stod(seedTagEntry.get_text()));
+  } catch (std::exception e) {
+    feedAndField.setSeedID(0);
+    // std::cout << "Please enter an integer seed ID." << std::endl;
+  }
+  try {
+    char prefix = seedXEntry.get_text()[0];
+    if (prefix == '-') {
+      feedAndField.setSeedX(-std::stod(seedXEntry.get_text().erase(0, 1)));
+    } else {
+      feedAndField.setSeedX(std::stod(seedXEntry.get_text()));
+    }
+  } catch (std::exception e) {
+    feedAndField.setSeedX(0);
+    // std::cout << "Please enter a numeric seed x coordinate." << std::endl;
+  }
+  try {
+    char prefix = seedYEntry.get_text()[0];
+    if (prefix == '-') {
+      feedAndField.setSeedY(-std::stod(seedYEntry.get_text().erase(0, 1)));
+    } else {
+      feedAndField.setSeedY(std::stod(seedYEntry.get_text()));
+    }
+  } catch (std::exception e) {
+    feedAndField.setSeedY(0);
+    // std::cout << "Please enter a numeric seed y coordinate." << std::endl;
+  }
+  // std::cout << "ID: " << feedAndField.getSeedID() << std::endl;
+  // std::cout << "Seed X: " << feedAndField.getSeedX() << std::endl;
+  // std::cout << "Seed Y: " << feedAndField.getSeedY() << std::endl;
+  // Reload feed and plotted points
   feedAndField.queue_draw();
-  // std::cout << "Redraw..." << std::endl;
   return true;
 }
 
@@ -206,9 +352,9 @@ Window::Window() {
   feedAndField.set_vexpand(true);
   grid.attach(feedAndField, 0, 0, 1, 1);
   // seedTagEntry.set_max_length(50);
-  // seedTagEntry.set_text("0000");
-  // seedXEntry.set_text("Seed X...");
-  // seedYEntry.set_text("Seed Y...");
+  seedTagEntry.set_text("0");
+  seedXEntry.set_text("0.5");
+  seedYEntry.set_text("0.5");
   grid.attach(seedTagEntry, 0, 1, 1, 1);
   grid.attach(seedXEntry, 0, 2, 1, 1);
   grid.attach(seedYEntry, 0, 3, 1, 1);
