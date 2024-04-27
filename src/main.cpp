@@ -2,6 +2,7 @@
 #include <string>
 // #include <regex>
 #include <map>
+#include <math.h>
 #include "opencv2/opencv.hpp"
 // #include <nlohmann/json.hpp>
 // #include <fstream>
@@ -12,6 +13,7 @@
 #include <gtkmm/drawingarea.h>
 #include <gdkmm/pixbuf.h>
 #include <gdkmm/general.h>
+#include <Eigen/Geometry>
 
 extern "C" {
   #include "apriltag.h"
@@ -30,11 +32,8 @@ cv::VideoCapture cap(0);
 apriltag_family_t* tf = tag36h11_create(); // 36h11 tag family used in FRC
 apriltag_detector_t* td = apriltag_detector_create();
 
-struct Tag {
-  int id;
-  double pitch, yaw, roll, i, j, k;
-  bool isSeed;
-  bool isGauged;
+struct TagPose {
+  double x, y, theta;
 };
 
 // Subclass of entry box that only accepts numeric input (https://stackoverflow.com/questions/10279579/force-numeric-input-in-a-gtkentry-widget#10282948)
@@ -51,7 +50,7 @@ void NumericEntry::on_insert_text(const Glib::ustring& text, int* position) {
 }
 
 bool NumericEntry::contains_only_numbers(const Glib::ustring& text) {
-  for(int i = 0; i < text.length(); i++) {
+  for (int i = 0; i < text.length(); i++) {
     if(Glib::Unicode::isdigit(text[i]) == false) return false;
   }
   return true;
@@ -65,12 +64,14 @@ class FeedAndField : public Gtk::DrawingArea {
     void setSeedID(int id);
     void setSeedX(double x);
     void setSeedY(double y);
+    void setSeedRotate(double angle);
     int getSeedID();
     double getSeedX();
     double getSeedY();
+    double getSeedRotate(); // in degrees?
     virtual ~FeedAndField();
   protected:
-    void plotOnField(const Cairo::RefPtr<Cairo::Context>& cr, double xMeters, double yMeters, int fieldXPixels, int fieldYPixels, bool isSeed);
+    void plotOnField(const Cairo::RefPtr<Cairo::Context>& cr, double xMeters, double yMeters, double theta, int fieldXPixels, int fieldYPixels, bool isSeed);
     void onDraw(const Cairo::RefPtr<Cairo::Context>& cr, int width, int height);
     // apriltag_family_t* tf;
     // apriltag_detector_t* td;
@@ -79,18 +80,19 @@ class FeedAndField : public Gtk::DrawingArea {
     const double fieldMetersX = 16.6;
     const double fieldMetersY = 8.2;
     const double tagSize = 0.1651; // Size of AprilTags in meters; should be 6.5 inches to meters according to the 2024 FRC game manual
-    const double fx = 200; // TODO - tune / calibrate to camera; maybe accept these as arguments
-    const int fy = 200;
-    const int cx = 100;
-    const int cy = 100;
+    const double fx = 500; // TODO - tune / calibrate to camera; maybe accept these as arguments
+    const int fy = 500;
+    const int cx = 250;
+    const int cy = 250;
     int seedID = 0;
     double seedX = 0;
     double seedY = 0;
-    std::map<int, std::pair<double, double>> tagPoses;
+    double seedRotate = 0;
+    std::map<int, TagPose> tagPoses;
 };
 
 FeedAndField::FeedAndField() {
-  tagPoses = std::map<int, std::pair<double, double>>();
+  tagPoses = std::map<int, TagPose>();
   apriltag_detector_add_family(td, tf);
   // TODO - tune
   td->quad_decimate = 2.0;
@@ -107,28 +109,41 @@ void FeedAndField::setSeedID(int id) {
     seedID = id;
     // Clear cached poses
     tagPoses.clear();
-    tagPoses[id] = std::pair<double, double>(seedX, seedY);
+    tagPoses[seedID] = {seedX, seedY, seedRotate};
   }
 }
+
 void FeedAndField::setSeedX(double x) {
   if (x != seedX) {
     seedX = x;
     // Clear cached poses
     tagPoses.clear();
-    tagPoses[seedID] = std::pair<double, double>(seedX, seedY);
+    tagPoses[seedID] = {seedX, seedY, seedRotate};
   }
 }
+
 void FeedAndField::setSeedY(double y) {
   if (y != seedY) {
     seedY = y;
     // Clear cached poses
     tagPoses.clear();
-    tagPoses[seedID] = std::pair<double, double>(seedX, seedY);
+    tagPoses[seedID] = {seedX, seedY, seedRotate};
   }
 }
+
+void FeedAndField::setSeedRotate(double theta) {
+  if (theta != seedRotate) {
+    seedRotate = theta;
+    // Clear cached poses
+    tagPoses.clear();
+    tagPoses[seedID] = {seedX, seedY, seedRotate};
+  }
+}
+
 int FeedAndField::getSeedID() { return seedID; }
 double FeedAndField::getSeedX() { return seedX; }
 double FeedAndField::getSeedY() { return seedY; }
+double FeedAndField::getSeedRotate() { return seedRotate; }
 
 FeedAndField::~FeedAndField() {
   apriltag_detector_destroy(td);
@@ -157,15 +172,19 @@ FeedAndField::~FeedAndField() {
   // layout->show_in_cairo_context(cr);
 // }
 
-void FeedAndField::plotOnField(const Cairo::RefPtr<Cairo::Context>& cr, double xMeters, double yMeters, int fieldXPixels, int fieldYPixels, bool isSeed) {
+void FeedAndField::plotOnField(const Cairo::RefPtr<Cairo::Context>& cr, double xMeters, double yMeters, double theta, int fieldXPixels, int fieldYPixels, bool isSeed) {
+  double x = fieldX + xMeters * fieldXPixels / fieldMetersX;
+  double y = fieldY + yMeters * fieldYPixels / fieldMetersY;
   cr->save();
-  cr->arc(fieldX + xMeters * fieldXPixels / fieldMetersX, fieldY + yMeters * fieldYPixels / fieldMetersY, 10, 0, 2.0 * M_PI);
+  cr->arc(x, y, 10, 0, 2.0 * M_PI);
   if (isSeed) {
     cr->set_source_rgb(0, 0, 0.8);
   } else {
     cr->set_source_rgb(0, 0.8, 0);
   }
   cr->fill_preserve();
+  cr->move_to(x, y);
+  cr->line_to(x + 20 * cos(theta * M_PI / 180), y + 20 * sin(theta * M_PI / 180));
   cr->restore();
   cr->stroke();
 }
@@ -240,7 +259,7 @@ void FeedAndField::onDraw(const Cairo::RefPtr<Cairo::Context>& cr, int width, in
   cr->fill();
 
   // Graph seed tag
-  plotOnField(cr, seedX, seedY, field->get_width(), field->get_height(), true);
+  plotOnField(cr, seedX, seedY, seedRotate, field->get_width(), field->get_height(), true);
 
   // Plot each tag on the map judging from the pose of a reference tag that already has a pose estimate, starting from the seed.
   // We need this because we have no idea where the camera is.
@@ -254,11 +273,10 @@ void FeedAndField::onDraw(const Cairo::RefPtr<Cairo::Context>& cr, int width, in
         zarray_get(detections, j, &to_compare_det);
         int to_compare_id = to_compare_det->id;
         
-
-        if (tagPoses.count(reference_id) && !tagPoses.count(to_compare_id)) { // We have a pose for the reference tag
+        if (tagPoses.count(reference_id) && to_compare_id != seedID) { // We have a pose for the reference tag
           // Do pose estimation with the reference and new tag
           apriltag_detection_info_t reference_info;
-          reference_info.det = to_compare_det;
+          reference_info.det = reference_det;
           reference_info.tagsize = tagSize;
           reference_info.fx = fx;
           reference_info.fy = fy;
@@ -275,21 +293,21 @@ void FeedAndField::onDraw(const Cairo::RefPtr<Cairo::Context>& cr, int width, in
           to_compare_info.cy = cy;
           apriltag_pose_t to_compare_pose;
           estimate_tag_pose(&to_compare_info, &to_compare_pose);
-          // Reference field space minus reference camera space plus new camera space for each coordinate
-          // TODO - check that right coordinates are compared and units are as expected
-          tagPoses[to_compare_id] = std::pair<double, double>(
-            tagPoses[reference_id].first - reference_pose.t->data[0] + to_compare_pose.t->data[0],
-            tagPoses[reference_id].second - reference_pose.t->data[1] + to_compare_pose.t->data[1]
-          ); 
+          tagPoses[to_compare_id] = {
+            tagPoses[reference_id].x - reference_pose.t->data[0] + to_compare_pose.t->data[0],
+            tagPoses[reference_id].y - reference_pose.t->data[2] + to_compare_pose.t->data[2],
+            tagPoses[reference_id].theta
+          }; 
+          // std::cout << "ID " << to_compare_id << " yaw: " << to_compare_pose.R->data.eulerAngles(2, 1, 0) << std::endl;
         }
       }
-    } 
+    }
   }
 
   // Iterate through known points and plot, with the exception of the seed that has already been plotted above
-  for (auto const& [id, coords] : tagPoses) {
+  for (auto const& [id, pose] : tagPoses) {
     if (id != seedID) {
-      plotOnField(cr, coords.first, coords.second, field->get_width(), field->get_height(), false);
+      plotOnField(cr, pose.x, pose.y, pose.theta, field->get_width(), field->get_height(), false);
     }
   }
   apriltag_detections_destroy(detections);
@@ -301,7 +319,7 @@ class Window : public Gtk::Window {
   protected:
     Gtk::Grid grid;
     FeedAndField feedAndField;
-    NumericEntry seedTagEntry, seedXEntry, seedYEntry;
+    NumericEntry seedTagEntry, seedXEntry, seedYEntry, seedRotateEntry;
     bool periodic();
 };
 
@@ -336,6 +354,17 @@ bool Window::periodic() {
     feedAndField.setSeedY(0);
     // std::cout << "Please enter a numeric seed y coordinate." << std::endl;
   }
+  try {
+    char prefix = seedRotateEntry.get_text()[0];
+    if (prefix == '-') {
+      feedAndField.setSeedRotate(-std::stod(seedRotateEntry.get_text().erase(0, 1)));
+    } else {
+      feedAndField.setSeedRotate(std::stod(seedRotateEntry.get_text()));
+    }
+  } catch (std::exception e) {
+    feedAndField.setSeedRotate(0);
+    // std::cout << "Please enter a number of degrees for the seed rotation." << std::endl;
+  }
   // std::cout << "ID: " << feedAndField.getSeedID() << std::endl;
   // std::cout << "Seed X: " << feedAndField.getSeedX() << std::endl;
   // std::cout << "Seed Y: " << feedAndField.getSeedY() << std::endl;
@@ -346,18 +375,20 @@ bool Window::periodic() {
 
 Window::Window() {
   set_title("Fieldspace");
-  set_default_size(1538, 530);
+  set_default_size(1538, 550);
   set_child(grid);
   feedAndField.set_hexpand(true);
   feedAndField.set_vexpand(true);
   grid.attach(feedAndField, 0, 0, 1, 1);
   // seedTagEntry.set_max_length(50);
   seedTagEntry.set_text("0");
-  seedXEntry.set_text("0.5");
-  seedYEntry.set_text("0.5");
+  seedXEntry.set_text("0");
+  seedYEntry.set_text("0");
+  seedRotateEntry.set_text("0");
   grid.attach(seedTagEntry, 0, 1, 1, 1);
   grid.attach(seedXEntry, 0, 2, 1, 1);
   grid.attach(seedYEntry, 0, 3, 1, 1);
+  grid.attach(seedRotateEntry, 0, 4, 1, 1);
 
   // seedTagEntry.set_max_length(50);
   // seedTagEntry.set_text(0);
